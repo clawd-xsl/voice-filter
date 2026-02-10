@@ -38,10 +38,47 @@ def get_duration(fpath):
     except:
         return (str(fpath), -1)
 
+def load_wav_as_tensor(fpath):
+    """Load wav file using wave module, return (tensor, sample_rate)."""
+    import wave, struct, torch
+    with wave.open(str(fpath), 'rb') as wf:
+        sr = wf.getframerate()
+        ch = wf.getnchannels()
+        sw = wf.getsampwidth()
+        frames = wf.getnframes()
+        data = wf.readframes(frames)
+    
+    if sw == 2:
+        samples = torch.frombuffer(bytearray(data), dtype=torch.int16).float() / 32768.0
+    elif sw == 4:
+        samples = torch.frombuffer(bytearray(data), dtype=torch.int32).float() / 2147483648.0
+    elif sw == 1:
+        samples = torch.frombuffer(bytearray(data), dtype=torch.uint8).float() / 128.0 - 1.0
+    else:
+        raise ValueError(f"Unsupported sample width: {sw}")
+    
+    if ch > 1:
+        samples = samples.view(-1, ch).mean(dim=1)
+    
+    return samples, sr
+
+def resample_simple(waveform, orig_sr, target_sr):
+    """Simple linear interpolation resampling (no torchaudio needed)."""
+    import torch
+    if orig_sr == target_sr:
+        return waveform
+    ratio = target_sr / orig_sr
+    new_len = int(len(waveform) * ratio)
+    indices = torch.arange(new_len, dtype=torch.float32) / ratio
+    indices = indices.clamp(0, len(waveform) - 1)
+    floor_idx = indices.long()
+    frac = indices - floor_idx.float()
+    ceil_idx = (floor_idx + 1).clamp(max=len(waveform) - 1)
+    return waveform[floor_idx] * (1 - frac) + waveform[ceil_idx] * frac
+
 def check_voice_batch(file_list, threshold, hub_dir=None):
     """Check a batch of files for voice using Silero VAD. Loads model once per process."""
     import torch
-    import torchaudio
     
     # Load from local cache to avoid multi-process conflicts
     if hub_dir:
@@ -53,19 +90,17 @@ def check_voice_batch(file_list, threshold, hub_dir=None):
     results = []
     for fpath in file_list:
         try:
-            waveform, sr = torchaudio.load(str(fpath))
-            if waveform.shape[0] > 1:
-                waveform = waveform.mean(dim=0, keepdim=True)
+            samples, sr = load_wav_as_tensor(fpath)
             if sr != 16000:
-                waveform = torchaudio.functional.resample(waveform, sr, 16000)
+                samples = resample_simple(samples, sr, 16000)
             
-            speech_timestamps = get_speech_timestamps(waveform.squeeze(), model, sampling_rate=16000)
+            speech_timestamps = get_speech_timestamps(samples, model, sampling_rate=16000)
             
             if not speech_timestamps:
                 results.append((str(fpath), 0.0))
                 continue
             
-            total_samples = waveform.shape[1]
+            total_samples = len(samples)
             speech_samples = sum(t['end'] - t['start'] for t in speech_timestamps)
             ratio = speech_samples / total_samples
             results.append((str(fpath), ratio))
@@ -193,11 +228,16 @@ def main():
     print("  Loading Silero VAD model...", flush=True)
     hub_dir = torch.hub.get_dir()
     _ = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
-    # Find the cached repo dir
     hub_cache = Path(hub_dir)
-    silero_dirs = list(hub_cache.glob("snakers4_silero-vad*"))
+    silero_dirs = sorted(hub_cache.glob("snakers4_silero-vad*"))
     silero_local = str(silero_dirs[0]) if silero_dirs else None
     print(f"  Model cached at: {silero_local}", flush=True)
+    # Quick sanity check on first candidate
+    try:
+        samples, sr = load_wav_as_tensor(str(candidates[0]))
+        print(f"  Sanity check: {candidates[0].name} samples={len(samples)} sr={sr} min={samples.min():.4f} max={samples.max():.4f}", flush=True)
+    except Exception as e:
+        print(f"  WARNING: Could not read {candidates[0].name}: {e}", flush=True)
     del _
     
     voice_files = []
