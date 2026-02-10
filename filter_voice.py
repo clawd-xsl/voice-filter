@@ -38,12 +38,16 @@ def get_duration(fpath):
     except:
         return (str(fpath), -1)
 
-def check_voice_batch(file_list, threshold):
+def check_voice_batch(file_list, threshold, hub_dir=None):
     """Check a batch of files for voice using Silero VAD. Loads model once per process."""
     import torch
     import torchaudio
     
-    model, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
+    # Load from local cache to avoid multi-process conflicts
+    if hub_dir:
+        model, utils = torch.hub.load(hub_dir, 'silero_vad', source='local', trust_repo=True)
+    else:
+        model, utils = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
     get_speech_timestamps = utils[0]
     
     results = []
@@ -183,6 +187,19 @@ def main():
         sys.exit(0)
 
     print(f"\n[Step 2/2] Running VAD on {len(candidates)} candidates...")
+    
+    # Pre-download model in main process to avoid multi-process cache conflicts
+    import torch
+    print("  Loading Silero VAD model...", flush=True)
+    hub_dir = torch.hub.get_dir()
+    _ = torch.hub.load('snakers4/silero-vad', 'silero_vad', trust_repo=True)
+    # Find the cached repo dir
+    hub_cache = Path(hub_dir)
+    silero_dirs = list(hub_cache.glob("snakers4_silero-vad*"))
+    silero_local = str(silero_dirs[0]) if silero_dirs else None
+    print(f"  Model cached at: {silero_local}", flush=True)
+    del _
+    
     voice_files = []
     t0 = time.time()
     
@@ -191,7 +208,7 @@ def main():
     
     done = 0
     with ProcessPoolExecutor(max_workers=min(args.workers, len(chunks))) as pool:
-        futures = {pool.submit(check_voice_batch, chunk, args.threshold): i for i, chunk in enumerate(chunks)}
+        futures = {pool.submit(check_voice_batch, chunk, args.threshold, silero_local): i for i, chunk in enumerate(chunks)}
         for future in as_completed(futures):
             results = future.result()
             for fpath, score in results:
