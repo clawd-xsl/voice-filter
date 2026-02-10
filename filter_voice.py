@@ -8,14 +8,33 @@ from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor, as_compl
 import subprocess, json
 
 def get_duration(fpath):
-    """Get audio duration via ffprobe."""
+    """Get audio duration. Uses wave module for .wav, mutagen or ffprobe as fallback."""
     try:
-        r = subprocess.run(
-            ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(fpath)],
-            capture_output=True, text=True, timeout=30
-        )
-        info = json.loads(r.stdout)
-        return (str(fpath), float(info["format"]["duration"]))
+        ext = Path(fpath).suffix.lower()
+        if ext == ".wav":
+            import wave
+            with wave.open(str(fpath), 'rb') as wf:
+                frames = wf.getnframes()
+                rate = wf.getframerate()
+                if rate == 0:
+                    return (str(fpath), -1)
+                return (str(fpath), frames / rate)
+        else:
+            # Try mutagen for other formats
+            try:
+                import mutagen
+                m = mutagen.File(str(fpath))
+                if m and m.info:
+                    return (str(fpath), m.info.length)
+            except:
+                pass
+            # Fallback to ffprobe
+            r = subprocess.run(
+                ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_format", str(fpath)],
+                capture_output=True, text=True, timeout=30
+            )
+            info = json.loads(r.stdout)
+            return (str(fpath), float(info["format"]["duration"]))
     except:
         return (str(fpath), -1)
 
